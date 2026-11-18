@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f6ed">
+  <meta name="description" content="点一点、听一听，在泡泡英语岛开口说英语。">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="泡泡英语岛">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="./app.webmanifest">
+  <link rel="icon" href="./art/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="./art/apple-touch-icon.png">
+  <link rel="stylesheet" href="./styles.css">
+  <title>泡泡英语岛</title>
+</head>
+<body>
+  <header class="site-header shell">
+    <button class="brand" data-action="home" aria-label="泡泡英语岛首页">
+      <img src="./art/icon-192.png" alt="" width="45" height="45">
+      <span>泡泡英语岛<small lang="en">Bubble English Island</small></span>
+    </button>
+    <div class="header-tools">
+      <span class="collection" id="collection" aria-live="polite"><span aria-hidden="true">🐚</span> <b>0</b><span class="collection-label"> 贝壳</span></span>
+      <button class="adult-button" data-action="parents">家长</button>
+    </div>
+  </header>
+  <main id="app" class="shell">
+    <noscript>请在浏览器设置中开启 JavaScript，才能玩泡泡英语岛。</noscript>
+  </main>
+  <footer class="site-footer shell">
+    <span>🐚 泡泡英语岛</span>
+    <button class="offline-badge" id="offline-badge" data-action="parents">
+      <span aria-hidden="true"></span><strong>正在准备离线包</strong>
+    </button>
+  </footer>
+  <dialog id="parents" aria-labelledby="parents-title">
+    <div class="dialog-body">
+      <button class="close-dialog" data-action="close-parents" aria-label="关闭家长设置">×</button>
+      <h2 id="parents-title">家长小帮手</h2>
+      <section>
+        <h3>装到 iPad</h3>
+        <ol>
+          <li>用 Safari 打开这个页面，点「分享」→「添加到主屏幕」。如有「作为网页 App 打开」，请开启它。</li>
+          <li>从主屏幕打开「泡泡英语岛」，联网等待显示「离线已就绪」。</li>
+          <li>可以打开飞行模式，再从主屏幕进入，点一次播放确认。</li>
+        </ol>
+        <p class="offline-detail" id="offline-detail" role="status"></p>
+        <button id="offline-retry" class="secondary" data-action="retry-offline" hidden>重新准备离线包</button>
+      </section>
+      <section>
+        <h3>陪孩子玩</h3>
+        <p>一次选一个地点就好。先听，再找图，最后一起说。她害羞时，可以先跟你一起说。</p>
+        <p>贝壳记录玩过的句子。学习记录保存在当前设备，应用无需麦克风。</p>
+        <p id="storage-note" hidden>当前浏览器无法保存进度。这次打开期间仍然可以继续玩。</p>
+      </section>
+    </div>
+  </dialog>
+  <audio id="voice" preload="none" hidden></audio>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
