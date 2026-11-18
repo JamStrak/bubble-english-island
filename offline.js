@@ -1,5 +1,5 @@
 const retryMessage = '离线下载还没完成，请联网后再试一次。';
-const timeoutMs = 75000;
+const timeoutMs = 195000;
 let pending;
 let checkedForUpdates = false;
 

@@ -1,10 +1,14 @@
 import { guides, islands, scenes } from './lessons.js';
 import { prepareOffline } from './offline.js';
+import { createSpeechCapture } from './speech-capture.js';
+import { prepareSpeech, recognizeSpeech } from './speech-engine.js';
+import { scoreFollowAlong } from './speech-feedback.js';
 
 const app = document.querySelector('#app');
 const voice = document.querySelector('#voice');
 const parents = document.querySelector('#parents');
 const storageNote = document.querySelector('#storage-note');
+const offlineBadge = document.querySelector('#offline-badge');
 const storageKey = 'bubble-english-island.encounters.v2';
 const legacyShells = 'bubble-english-island.shells.v1';
 const speaker = '<span class="speaker-shape" aria-hidden="true"><i></i><b></b></span>';
@@ -16,7 +20,7 @@ let progress = loadProgress();
 let session;
 let activeVoice;
 let lastDialogFocus;
-let familyScene;
+const speechCapture = createSpeechCapture();
 
 function loadProgress() {
   try {
@@ -27,7 +31,11 @@ function loadProgress() {
           !/^\d{4}-\d{2}-\d{2}$/.test(value.lastPlayed)) return [];
       const firstResponses = Array.isArray(value.firstResponses)
         ? scene.ids.filter(id => value.firstResponses.includes(id)) : [];
-      return [[scene.id, { visits: value.visits, lastPlayed: value.lastPlayed, firstResponses }]];
+      const speechStars = Object.fromEntries(scene.ids.flatMap(id => {
+        const stars = value.speechStars?.[id];
+        return Number.isInteger(stars) && stars >= 1 && stars <= 3 ? [[id, stars]] : [];
+      }));
+      return [[scene.id, { visits: value.visits, lastPlayed: value.lastPlayed, firstResponses, speechStars }]];
     }));
   } catch {
     storageNote.hidden = false;
@@ -55,7 +63,22 @@ function saveVisit({ scene, firstResponses }) {
     visits: (previous?.visits || 0) + 1,
     lastPlayed: localDate(),
     firstResponses: [...new Set([...(previous?.firstResponses || []), ...firstResponses])],
+    speechStars: previous?.speechStars || {},
   } };
+  saveProgress();
+}
+
+function saveSpeechStars(sceneId, lessonId, stars) {
+  const latest = loadProgress();
+  const previous = latest[sceneId] || progress[sceneId];
+  if (!previous || (previous.speechStars[lessonId] || 0) >= stars) return;
+  progress = { ...progress, ...latest, [sceneId]: {
+    ...previous, speechStars: { ...previous.speechStars, [lessonId]: stars },
+  } };
+  saveProgress();
+}
+
+function saveProgress() {
   try {
     localStorage.setItem(storageKey, JSON.stringify(progress));
   } catch {
@@ -65,8 +88,11 @@ function saveVisit({ scene, firstResponses }) {
 
 function updateParentNote() {
   const played = Object.keys(progress).length;
+  const spoken = Object.values(progress).flatMap(visit => Object.values(visit.speechStars));
   document.querySelector('#family-progress').textContent =
     played ? `玩过 ${played} 个情境。可以换个地方、换样东西，再听听同一句。` : '选一个孩子熟悉的场景，从一两句开始。';
+  document.querySelector('#family-stars').textContent = spoken.length
+    ? `跟读过 ${spoken.length} 句，共收集 ${spoken.reduce((total, stars) => total + stars, 0)} 颗星。` : '';
   try {
     const old = JSON.parse(localStorage.getItem(legacyShells) || '[]');
     const count = Array.isArray(old) ? scenes.flatMap(scene => scene.ids).filter(id => old.includes(id)).length : 0;
@@ -83,6 +109,7 @@ function show(content, focus = true) {
 }
 
 function renderHome(focus = true) {
+  cancelSpeech(false);
   stopVoice();
   session = undefined;
   const next = suggest(scenes);
@@ -188,24 +215,22 @@ function actionBoard({ attempt, scene }) {
 
 function renderLesson(focus = true) {
   const s = session;
+  if (s.phase === 'speak') return renderSpeech(focus);
   const { scene, phase, attempt } = s;
   const lesson = currentLesson(s);
-  const title = { model: '听泡泡说', act: '来帮帮泡泡', speak: '轮到你啦' }[phase];
+  const title = phase === 'model' ? '听泡泡说' : '来帮帮泡泡';
   const description = {
     model: '听一听，看看发生了什么。',
     act: '听完英语，再动手。',
-    speak: '想说的话，就用英语招呼泡泡。',
   }[phase];
   const visual = phase === 'act' ? actionBoard(s) : phase === 'model'
     ? `<figure class="demo${s.modeled ? ' demonstrated' : ''}" data-demonstration>
          <img src="${lesson.picture}" width="600" height="400" alt="${escape(lesson.chinese)}">
          ${s.modeled ? `<figcaption>${lesson.prop.outcome}</figcaption>` : ''}
-       </figure>`
-    : `<div class="turn-taking"><img src="./art/apple-touch-icon.png" width="104" height="104" alt="泡泡在等你">
-         <span aria-hidden="true">•••</span></div>`;
-  const ready = phase === 'model' ? s.modeled : phase === 'act' ? !!attempt.result : true;
+       </figure>` : '';
+  const ready = phase === 'model' ? s.modeled : !!attempt.result;
   const next = phase === 'model' ? s.modelIndex === 0 ? '再听一句' : '我来帮忙'
-    : phase === 'act' ? s.trialNum < 2 ? '再帮一次' : '轮到我啦' : '玩好啦';
+    : s.trialNum < 2 ? '再帮一次' : '轮到我啦';
   show(`
     <div class="trip-top">
       <button class="secondary" data-action="home">← 回小岛</button>
@@ -221,12 +246,170 @@ function renderLesson(focus = true) {
         <button class="guide-button" data-action="help" aria-label="${phase === 'act' ? '需要帮忙，听中文提示' : '听中文提示'}">? <span>听提示</span></button>
       </div>
       ${visual}
-      ${phase === 'speak' ? `<p class="speak-text" lang="en">${escape(lesson.english)}</p>
-        <button class="secondary switch-phrase" data-action="switch-phrase">换一句</button>` : ''}
       <p class="feedback" role="status" id="feedback">${s.feedback}</p>
       <button class="primary next-button" data-action="continue" ${ready ? '' : 'disabled'}>${next} →</button>
     </section>`, focus);
   syncVoiceControls();
+}
+
+const microphone = '<span class="mic-icon" aria-hidden="true"><i></i></span>';
+
+function renderSpeech(focus = false) {
+  const { speech, scene } = session;
+  const lesson = currentLesson(session);
+  const { stage, score, practice, message } = speech;
+  const busy = ['permission', 'demo', 'recording', 'checking', 'replay'].includes(stage);
+  const alternate = scene.lessons[1 - session.modelIndex];
+  const nextLabel = practice.has(alternate.id) ? '换回另一句' : '下一句';
+  const leadWithNext = score?.stars === 3 && !practice.has(alternate.id) && !busy;
+  const titles = {
+    ready: '和泡泡跟一句', permission: '打开麦克风', demo: '先听泡泡说',
+    recording: '轮到你说啦', checking: '泡泡在想一想', result: score?.stars ? '泡泡听到啦' : '我们再说一次',
+    unavailable: '先听泡泡说', replay: '听泡泡说',
+  };
+  const descriptions = {
+    ready: '泡泡先说一遍，麦克风亮了就跟着说。', permission: '请家长帮忙允许麦克风。',
+    demo: '听完这一句，再轮到你。', recording: '说完停一停，泡泡会给你星星。',
+    checking: '马上就好。', result: score?.message || '再听一遍，跟着泡泡试试。',
+    unavailable: '你可以听示范，自己跟着说。', replay: '等泡泡说完，你也可以说一遍。',
+  };
+  const stars = score?.stars > 0 ? `<div class="speech-stars" aria-label="获得 ${score.stars} 颗星，共 3 颗">
+    ${[1, 2, 3].map(level => `<span class="${level <= score.stars ? 'earned' : ''}" aria-hidden="true">★</span>`).join('')}
+  </div>` : '';
+  const primary = stage === 'unavailable'
+    ? `<button class="primary speech-cta" data-action="speech-demo">${speaker} 听英语</button>`
+    : busy ? '' : leadWithNext ? '<button class="primary speech-cta" data-action="speech-next">下一句 →</button>'
+      : `<button class="primary speech-cta" data-action="speech-start">${microphone}
+         ${score || message ? '再听一遍，跟着说' : '听一句，跟一句'}</button>`;
+  const next = !busy && (practice.has(lesson.id) || stage === 'unavailable');
+  const showStatus = busy ? `<span class="speech-signal" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>` : '';
+  show(`
+    <div class="trip-top speech-top">
+      <button class="quiet-button" data-action="home">← 回小岛</button>
+      <span class="location"><span aria-hidden="true">${scene.island.emoji}</span> ${scene.name}</span>
+    </div>
+    <section class="practice speech-practice" data-phase="speak" data-speech-stage="${stage}">
+      <div class="speech-stage">
+        <div class="bubble-companion" aria-hidden="true"><img src="./art/apple-touch-icon.png" width="104" height="104" alt=""></div>
+        <div class="speech-status" aria-live="polite">
+          <h1 tabindex="-1">${titles[stage]}</h1>
+          <p>${escape(message || descriptions[stage])}</p>
+        </div>
+        <p class="speak-text" lang="en">${escape(lesson.english)}</p>
+        ${stage === 'recording' ? `<span class="recording-mark" aria-hidden="true">${microphone}</span>` : ''}
+        ${showStatus}${stars}${primary}
+      </div>
+      <div class="speech-extras">
+        ${!busy && stage !== 'unavailable' ? '<button class="quiet-button" data-action="speech-demo">只听示范</button>' : ''}
+        ${stage === 'unavailable' ? '<button class="quiet-button" data-action="speech-start">重试麦克风</button>' : ''}
+        ${next && !leadWithNext ? `<button class="quiet-button speech-next" data-action="speech-next">${nextLabel} →</button>` : ''}
+        ${leadWithNext ? '<button class="quiet-button" data-action="speech-start">再练这句</button>' : ''}
+        ${practice.size === scene.lessons.length && !busy ? '<button class="quiet-button" data-action="parents">在家接着玩</button>' : ''}
+      </div>
+    </section>`, focus);
+}
+
+function setSpeechStage(stage, message = '') {
+  Object.assign(session.speech, { stage, message });
+  renderSpeech(stage === 'result');
+}
+
+function cancelSpeech(render = true) {
+  if (session?.phase !== 'speak') return;
+  const { speech } = session;
+  speech.task?.abort();
+  speech.task = null;
+  speechCapture.release();
+  if (!['ready', 'result', 'unavailable'].includes(speech.stage)) {
+    Object.assign(speech, { stage: speech.score ? 'result' : 'ready', message: '' });
+    if (render) renderSpeech();
+  }
+}
+
+async function startFollowAlong() {
+  const s = session;
+  if (s?.phase !== 'speak' || !['ready', 'result', 'unavailable'].includes(s.speech.stage)) return;
+  if (offlineBadge.dataset.state !== 'ready') {
+    setSpeechStage('ready', '离线评分包还在准备，可以先听示范。');
+    return;
+  }
+  const { speech } = s;
+  const lesson = currentLesson(s);
+  const task = new AbortController();
+  speech.task = task;
+  speech.score = null;
+  const valid = () => session === s && speech.task === task && !task.signal.aborted;
+  if (!speechCapture.prepared) {
+    setSpeechStage('permission');
+    try {
+      await speechCapture.prepare();
+      if (!valid()) return;
+    } catch (error) {
+      if (valid()) {
+        cancelSpeech(false);
+        setSpeechStage('unavailable', error.code === 'permission'
+          ? '麦克风还没打开，请家长帮忙检查浏览器权限。'
+          : '这台设备暂时打不开麦克风。');
+      }
+      return;
+    }
+  }
+
+  const engine = prepareSpeech({ signal: task.signal }).then(() => true, () => false);
+  setSpeechStage('demo');
+  void playVoice(lesson.audio, 'speech-demo', async () => {
+    if (!valid()) return;
+    setSpeechStage('recording');
+    try {
+      const samples = await speechCapture.listen({ signal: task.signal });
+      if (!valid()) return;
+      speechCapture.release();
+      setSpeechStage('checking');
+      if (!await engine) throw new Error('Speech model unavailable');
+      if (!valid()) return;
+      const transcript = await recognizeSpeech(samples, { signal: task.signal });
+      if (!valid()) return;
+      speech.score = scoreFollowAlong(transcript, lesson.english);
+      if (speech.score.stars > 0) {
+        speech.practice.add(lesson.id);
+        saveSpeechStars(s.scene.id, lesson.id, speech.score.stars);
+      }
+      setSpeechStage('result');
+    } catch (error) {
+      if (valid()) setSpeechStage('ready', error.code === 'no-speech'
+        ? '泡泡还没听到声音。再试一次，等麦克风亮了再说。'
+        : '评分暂时没准备好，请稍后再跟读。');
+    } finally {
+      if (valid()) {
+        speech.task = null;
+        speechCapture.release();
+      }
+    }
+  }, () => {
+    if (!valid()) return;
+    speech.task = null;
+    setSpeechStage('ready', '再点一次，就能播放示范。');
+  });
+}
+
+function replaySpeech() {
+  const s = session;
+  if (s?.phase !== 'speak' || !['ready', 'result', 'unavailable'].includes(s.speech.stage)) return;
+  const { stage, message } = s.speech;
+  const finish = () => { if (s === session) setSpeechStage(stage, message); };
+  setSpeechStage('replay');
+  void playVoice(currentLesson(s).audio, 'speech-demo', finish, finish);
+}
+
+function nextSpeechPhrase() {
+  const s = session;
+  if (s?.phase !== 'speak' || !['ready', 'result', 'unavailable'].includes(s.speech.stage)) return;
+  if (!s.speech.practice.has(currentLesson(s).id) && s.speech.stage !== 'unavailable') return;
+  const stage = s.speech.stage === 'unavailable' ? 'unavailable' : 'ready';
+  cancelSpeech(false);
+  s.modelIndex = 1 - s.modelIndex;
+  s.speech.score = null;
+  setSpeechStage(stage);
 }
 
 function syncVoiceControls() {
@@ -258,7 +441,7 @@ function stopVoice() {
   voice.pause();
 }
 
-async function playVoice(src, kind, after) {
+async function playVoice(src, kind, after, interrupted) {
   const s = session;
   stopVoice();
   const playback = { kind, src };
@@ -269,9 +452,10 @@ async function playVoice(src, kind, after) {
     if (activeVoice !== playback || session !== s) return;
     stopVoice();
     if (showError && kind === 'family') document.querySelector('#family-audio-state').textContent = '声音没播出来，再点一下试试。';
-    else if (showError && s) setFeedback('声音没播出来，再点一下试试。');
+    else if (showError && s && kind !== 'speech-demo') setFeedback('声音没播出来，再点一下试试。');
     syncVoiceControls();
     if (ended) after?.();
+    else interrupted?.();
   }
   voice.onended = () => finish(true);
   voice.onerror = () => finish(false, true);
@@ -369,44 +553,22 @@ function continueLesson() {
     if (!s.attempt.result) return;
     if (s.trialNum < 2) beginTrial();
     else {
+      saveVisit(s);
       s.phase = 'speak';
       s.modelIndex = s.scene.lessons.indexOf(s.lastTarget);
-      s.feedback = '';
+      s.speech = { stage: 'ready', score: null, message: '', practice: new Set(), task: null };
     }
-  } else return finishScene(s);
+  } else return;
   stopVoice();
   renderLesson();
 }
 
-function switchPhrase() {
-  if (session?.phase !== 'speak') return;
-  stopVoice();
-  session.modelIndex = 1 - session.modelIndex;
-  renderLesson(false);
-  void listen();
-}
-
-function finishScene(s) {
-  stopVoice();
-  saveVisit(s);
-  session = undefined;
-  show(`
-    <section class="practice celebration">
-      <img class="finish-buddy" src="./art/apple-touch-icon.png" width="112" height="112" alt="">
-      <h1 tabindex="-1">今天玩到这儿</h1>
-      <p>下次再和泡泡一起玩。</p>
-      <div class="finish-options">
-        <button class="primary" data-action="home">回小岛 →</button>
-        <button class="secondary" data-action="parents" data-scene="${s.scene.id}">在家接着玩</button>
-      </div>
-    </section>`);
-}
-
 function openParents(scene = session?.scene) {
   if (parents.hasAttribute('open')) return;
+  cancelSpeech();
   stopVoice();
   updateParentNote();
-  familyScene = scene || scenes[0];
+  const familyScene = scene || scenes[0];
   document.querySelector('#home-activity').textContent = familyScene.atHome;
   document.querySelector('#family-voices').innerHTML = familyScene.lessons.map(lesson =>
     `<button class="secondary" data-action="family-listen" data-src="${lesson.audio}" aria-pressed="false">
@@ -434,19 +596,19 @@ function closeParents() {
 }
 
 async function refreshOffline() {
-  const badge = document.querySelector('#offline-badge');
+  const badge = offlineBadge;
   const label = badge.querySelector('strong');
   const detail = document.querySelector('#offline-detail');
   const retry = document.querySelector('#offline-retry');
   badge.dataset.state = 'loading';
   label.textContent = '正在准备离线包';
-  detail.textContent = '正在保存全部插图和声音，请保持当前页面打开。';
+  detail.textContent = '首次准备约 49 MB，包含语音评分，请保持当前页面打开。';
   retry.hidden = true;
   try {
     await prepareOffline();
     badge.dataset.state = 'ready';
     label.textContent = '离线已就绪';
-    detail.textContent = '全部练习和声音已保存在这里，可以断网使用。';
+    detail.textContent = '练习、声音和跟读评分都可以断网使用。';
   } catch (error) {
     badge.dataset.state = 'error';
     label.textContent = '离线包待准备';
@@ -467,7 +629,9 @@ document.addEventListener('click', event => {
     case 'help': void help(); break;
     case 'prop': enact(button.dataset.prop); break;
     case 'continue': continueLesson(); break;
-    case 'switch-phrase': switchPhrase(); break;
+    case 'speech-start': void startFollowAlong(); break;
+    case 'speech-demo': replaySpeech(); break;
+    case 'speech-next': nextSpeechPhrase(); break;
     case 'parents': openParents(scenes.find(scene => scene.id === button.dataset.scene)); break;
     case 'family-listen':
       if (session?.phase === 'act' && !session.attempt.result) session.attempt.supported = true;
@@ -490,9 +654,14 @@ document.addEventListener('keydown', event => {
 });
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    cancelSpeech();
     stopVoice();
     syncVoiceControls();
   }
+});
+window.addEventListener('pagehide', () => {
+  cancelSpeech(false);
+  stopVoice();
 });
 window.addEventListener('storage', event => {
   if (event.key === storageKey) progress = loadProgress();
